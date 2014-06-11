@@ -17,8 +17,10 @@
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 #include <linux/vmalloc.h>
+#include <linux/slab.h>
+#include <linux/preempt.h>	// preempt_*
 
-//#define MMC_DEBUG_ON
+#define MMC_DEBUG_ON
 #ifdef MMC_DEBUG_ON
 #define MMC_DEBUG(X) printk(KERN_ALERT X "\n")
 #else 
@@ -39,7 +41,7 @@ struct modulememcheck_alloc_obj {
 };
 
 static DEFINE_SPINLOCK(mmc_allocations_lock);
-static DEFINE_PER_CPU(long, modulememcheck_regs_flags);
+//static DEFINE_PER_CPU(long, modulememcheck_regs_flags);
 
 /* ascending order by address */
 static struct list_head modulememcheck_allocations_head;
@@ -147,27 +149,70 @@ static int modulememcheck_hide_addr(unsigned long address)
 	return 1;
 }
 
+static void modulememcheck_show_all(void)
+{
+	struct modulememcheck_alloc_obj *pos;
+
+	if (list_empty(&modulememcheck_allocations_head))
+		return ;
+
+	list_for_each_entry(pos, &modulememcheck_allocations_head, list) {
+		if (0 == pos->type) {
+			int i;
+			unsigned long address = pos->page_address;
+			for (i = 0; i < pos->pages; i++) {
+				modulememcheck_show_addr(address);
+				address += PAGE_SIZE;
+			}
+		}
+	}
+}
+
+static void modulememcheck_hide_all(void)
+{
+	struct modulememcheck_alloc_obj *pos;
+
+	if (list_empty(&modulememcheck_allocations_head))
+		return ;
+
+	list_for_each_entry(pos, &modulememcheck_allocations_head, list) {
+		if (0 == pos->type) {
+			int i;
+			unsigned long address = pos->page_address;
+			for (i = 0; i < pos->pages; i++) {
+				modulememcheck_hide_addr(address);
+				address += PAGE_SIZE;
+			}
+		}
+	}
+}
+
+static long saved_regs_flags = 0;
 static void modulememcheck_set_singlestep(struct pt_regs *regs)
 {
-	long saved_regs_flags = __get_cpu_var(modulememcheck_regs_flags);
+//	long saved_regs_flags = __get_cpu_var(modulememcheck_regs_flags);
 
+//	if (!(saved_regs_flags & X86_EFLAGS_TF))
+	saved_regs_flags = regs->flags;
+	if (saved_regs_flags & X86_EFLAGS_IF)
+		regs->flags &= ~X86_EFLAGS_IF;
+	if (!(saved_regs_flags & X86_EFLAGS_TF))
+		regs->flags |= X86_EFLAGS_TF;
+	return ;
+
+/*
 	if (!(regs->flags & X86_EFLAGS_TF))
 		saved_regs_flags = regs->flags;
 
 	regs->flags |= X86_EFLAGS_TF;
 	regs->flags &= ~X86_EFLAGS_IF;
 	return ;
-
-//	if (!(saved_regs_flags & X86_EFLAGS_TF))
-		saved_regs_flags = regs->flags;
-	regs->flags &= ~X86_EFLAGS_IF;
-	regs->flags |= X86_EFLAGS_TF;
-
+	*/
 }
 
 static void modulememcheck_clear_singlestep(struct pt_regs *regs)
 {
-	long saved_regs_flags = __get_cpu_var(modulememcheck_regs_flags);
+//	long saved_regs_flags = __get_cpu_var(modulememcheck_regs_flags);
 
 	if (!(saved_regs_flags & X86_EFLAGS_TF))
 		regs->flags &= ~X86_EFLAGS_TF;
@@ -175,10 +220,13 @@ static void modulememcheck_clear_singlestep(struct pt_regs *regs)
 		regs->flags |= X86_EFLAGS_IF;
 	return ;
 
-	if (saved_regs_flags & X86_EFLAGS_TF)
+/*
+	if (!(saved_regs_flags & X86_EFLAGS_TF))
 		regs->flags &= ~X86_EFLAGS_TF;
-	if (!(saved_regs_flags & X86_EFLAGS_IF))
+	if (saved_regs_flags & X86_EFLAGS_IF)
 		regs->flags |= X86_EFLAGS_IF;
+	return ;
+	*/
 }
 
 static int mmc_what_flag = 0;
@@ -187,7 +235,7 @@ bool modulememcheck_fault(struct pt_regs *regs, unsigned long address,
 	unsigned long error_code)
 {
 	unsigned long ret;
-	unsigned long irq_flags;
+//	unsigned long irq_flags;
 
 	if (modulememcheck_enabled == MODULEMEMCHECK_DISABLED)
 		return false;
@@ -196,6 +244,7 @@ bool modulememcheck_fault(struct pt_regs *regs, unsigned long address,
 
 	BUG_ON(!regs);
 
+
 	if (regs->flags & X86_VM_MASK)
 		return false;
 	if (regs->cs != __KERNEL_CS)
@@ -203,19 +252,25 @@ bool modulememcheck_fault(struct pt_regs *regs, unsigned long address,
 
 	//printk("[MODULE MEM CHECK] : modulememcheck falut ! \n");
 	
-	MMC_DEBUG("modulememcheck_fault : lock");
+//	MMC_DEBUG("modulememcheck_fault : lock");
 //	spin_lock_irqsave(&mmc_allocations_lock, irq_flags);
+	modulememcheck_show_all();
 	ret = modulememcheck_is_interest(address);
-	MMC_DEBUG("modulememcheck_fault : unlock");
+//	MMC_DEBUG("modulememcheck_fault : unlock");
 //	spin_unlock_irqrestore(&mmc_allocations_lock, irq_flags);
 
-	if (ret == 0)
-		return false;
-
-	// make the pte present
-	if (!modulememcheck_show_addr(address)) {	// pte is 0 
+	if (ret == 0) {
+		modulememcheck_hide_all();
 		return false;
 	}
+/*
+	// make the pte present
+	if (!modulememcheck_show_addr(address)) {	// pte is 0 
+	//	MMC_DEBUG("modulememcheck_fault : show addr false");
+		printk("modulememcheck_fault : show addr false\n");
+		return false;
+	}
+*/
 	hide_address = address;
 	mmc_what_flag = 1;
 
@@ -225,7 +280,7 @@ bool modulememcheck_fault(struct pt_regs *regs, unsigned long address,
 //	printk(KERN_ALERT"[MMC]fault :  %lx\n", address);
 			;//printk("[MMC]->modulememcheck_fault\n");
 	}// else 
-	
+
 	// ret == 1
 	// for single step
 	modulememcheck_set_singlestep(regs);
@@ -240,7 +295,8 @@ bool modulememcheck_trap(struct pt_regs *regs)
 	if (mmc_what_flag == 0)
 		return false;
 //	printk(KERN_ALERT"[MMC]trap : \n");
-	modulememcheck_hide_addr(hide_address);
+	modulememcheck_hide_all();
+//	modulememcheck_hide_addr(hide_address);
 	mmc_what_flag = 0;
 	modulememcheck_clear_singlestep(regs);
 	return true;
@@ -325,8 +381,8 @@ static void modulememcheck_allocations_remove(struct modulememcheck_alloc_obj *o
 		}
 	}
 	modulememcheck_allocations_del(obj);
-	kfree(obj);
-	//vfree(obj);
+	//kfree(obj);
+	vfree(obj);
 }
 
 static void modulememcheck_allocations_clear(void)
@@ -367,9 +423,9 @@ bool modulememcheck_alloc(unsigned long address, unsigned long size)
 	int i;
 	pte_t *pte;
 	int level;
-	unsigned long irq_flags;
-	obj = (struct modulememcheck_alloc_obj *)kmalloc(sizeof(struct modulememcheck_alloc_obj), GFP_KERNEL);
-	//obj = (struct modulememcheck_alloc_obj *)vmalloc(sizeof(struct modulememcheck_alloc_obj));
+//	unsigned long irq_flags;
+//	obj = (struct modulememcheck_alloc_obj *)kmalloc(sizeof(struct modulememcheck_alloc_obj), GFP_KERNEL);
+	obj = (struct modulememcheck_alloc_obj *)vmalloc(sizeof(struct modulememcheck_alloc_obj));
 	if (!obj) {
 		printk("[MMC]->modulememcheck_alloc :not enough memory\n");
 		return false;
@@ -384,7 +440,7 @@ bool modulememcheck_alloc(unsigned long address, unsigned long size)
 	}
 	
 
-	MMC_DEBUG("modulememcheck_alloc : lock");
+//	MMC_DEBUG("modulememcheck_alloc : lock");
 //	spin_lock_irqsave(&mmc_allocations_lock, irq_flags);
 	// is a 2M page ?
 	if (2 == level)  {	// 2: PG_LEVEL_2M
@@ -402,6 +458,10 @@ bool modulememcheck_alloc(unsigned long address, unsigned long size)
 		/* hide all the pages related to the [address, address + size] */	
 		size = size + address - obj->page_address;
 		obj->pages = (size / PAGE_SIZE) + ((size % PAGE_SIZE) ? 1 : 0);
+
+//		printk(KERN_ALERT "[MMC]ALLOC: address 0x%.8lx, paddr 0x%.8lx, pages %d\n", 
+//				obj->address, obj->page_address, obj->pages);
+
 		if (!modulememcheck_allocations_add(obj)) {
 			goto mmc_alloc_failed;
 		}
@@ -410,14 +470,14 @@ bool modulememcheck_alloc(unsigned long address, unsigned long size)
 			address += PAGE_SIZE;
 		}
 	}
-	MMC_DEBUG("modulememcheck_alloc : unlock");
+//	MMC_DEBUG("modulememcheck_alloc : unlock");
 	//spin_unlock_irqrestore(&mmc_allocations_lock, irq_flags);
 	return true;
 mmc_alloc_failed:
-	MMC_DEBUG("modulememcheck_alloc : unlock");
+//	MMC_DEBUG("modulememcheck_alloc : unlock");
 	//spin_unlock_irqrestore(&mmc_allocations_lock, irq_flags);
-//	vfree(obj);
-	kfree(obj);
+	vfree(obj);
+	//kfree(obj);
 	return false;
 }
 EXPORT_SYMBOL(modulememcheck_alloc);
@@ -426,11 +486,11 @@ void modulememcheck_free(unsigned long address_start)
 {
 	struct modulememcheck_alloc_obj *obj;
 	unsigned long irq_flags;
-	MMC_DEBUG("modulememcheck_free : lock");
+//	MMC_DEBUG("modulememcheck_free : lock");
 	//spin_lock_irqsave(&mmc_allocations_lock, irq_flags);
 	obj = modulememcheck_allocations_lookup(address_start);
 	modulememcheck_allocations_remove(obj);
-	MMC_DEBUG("modulememcheck_free : unlock");
+//	MMC_DEBUG("modulememcheck_free : unlock");
 //	spin_unlock_irqrestore(&mmc_allocations_lock, irq_flags);
 }
 EXPORT_SYMBOL(modulememcheck_free);
@@ -456,10 +516,10 @@ void unregister_modulememcheck_pf_handler(void)
 		modulememcheck_pf_handler = NULL;
 	 
 		// clear the allocations objs
-		MMC_DEBUG("unregister_modulememcheck_pf_handler : lock");
+//		MMC_DEBUG("unregister_modulememcheck_pf_handler : lock");
 //		spin_lock_irqsave(&mmc_allocations_lock, irq_flags);
 		modulememcheck_allocations_clear();
-		MMC_DEBUG("unregister_modulememcheck_pf_handler : lock");
+//		MMC_DEBUG("unregister_modulememcheck_pf_handler : lock");
 //		spin_unlock_irqrestore(&mmc_allocations_lock, irq_flags);
 
 		printk("[MMC] : unregistered!\n");
