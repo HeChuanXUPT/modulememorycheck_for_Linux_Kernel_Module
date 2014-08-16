@@ -1,3 +1,4 @@
+Auther("HeChuan")
 HOW TO PATCH
 1.enter the kernel directory, like linux-3.6.8/
 2.#patch -p1 < mmc.patch
